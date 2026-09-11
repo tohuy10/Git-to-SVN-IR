@@ -10,6 +10,8 @@ from openpyxl.styles import Font, PatternFill, Alignment
 
 EXCEL_FILE_NAME = "Git_Review_Log.xlsx"
 SHEET_NAME = "Review Logs"
+TZ_GMT7 = timezone(timedelta(hours=7))
+DATE_DISPLAY_FORMAT = "%d %b, %Y %I:%M %p"  # e.g., 11 Sep, 2026 12:08 AM
 commit_cache = {}
 
 
@@ -28,7 +30,12 @@ def run_cmd(cmd, cwd=None):
 
 
 def sync_svn(work_dir: str, svn_url: str, user: str, password: str):
-    auth_args = ["--non-interactive", "--no-auth-cache"]
+    auth_args = [
+        "--non-interactive",
+        "--no-auth-cache",
+        "--trust-server-cert",
+        "--trust-server-cert-failures=unknown-ca,cn-mismatch,expired,not-yet-valid,other"
+    ]
     if user:
         auth_args.extend(["--username", user, "--password", password])
 
@@ -46,7 +53,12 @@ def sync_svn(work_dir: str, svn_url: str, user: str, password: str):
 
 
 def commit_to_svn(work_dir: str, user: str, password: str):
-    auth_args = ["--non-interactive", "--no-auth-cache"]
+    auth_args = [
+        "--non-interactive",
+        "--no-auth-cache",
+        "--trust-server-cert",
+        "--trust-server-cert-failures=unknown-ca,cn-mismatch,expired,not-yet-valid,other"
+    ]
     if user:
         auth_args.extend(["--username", user, "--password", password])
 
@@ -78,7 +90,99 @@ def get_commit_details(repo: str, sha: str, headers: dict):
     return {}
 
 
-def process_repository(repo: str, token: str, since_dt: datetime):
+def parse_github_datetime(iso_str: str):
+    """
+    Parses a GitHub UTC ISO string (e.g. 2026-09-11T08:00:00Z).
+    Returns a tuple of (utc_datetime_object, gmt7_formatted_string).
+    Example format: '11 Sep, 2026 12:08 AM'
+    """
+    if not iso_str:
+        return datetime.min.replace(tzinfo=timezone.utc), ""
+    utc_dt = datetime.fromisoformat(iso_str.replace("Z", "+00:00"))
+    gmt7_dt = utc_dt.astimezone(TZ_GMT7)
+    return utc_dt, gmt7_dt.strftime(DATE_DISPLAY_FORMAT)
+
+
+def fetch_all_pages(base_url: str, headers: dict) -> list:
+    """
+    Traverses GitHub's RFC 5988 pagination headers (Link: rel='next').
+    Only makes multiple calls if total items exceed per_page (100).
+    """
+    items = []
+    current_url = f"{base_url}{'&' if '?' in base_url else '?'}per_page=100"
+
+    while current_url:
+        resp = requests.get(current_url, headers=headers, timeout=15)
+        if resp.status_code != 200:
+            break
+        data = resp.json()
+        if not isinstance(data, list):
+            break
+        items.extend(data)
+
+        # Follow next page URL from Link header if present
+        current_url = resp.links.get("next", {}).get("url")
+
+    return items
+
+
+def get_repo_watermarks(file_path: str) -> dict:
+    """
+    Scans the existing Excel file to extract the latest review timestamp per repository.
+    Supports both new ('%d %b, %Y %I:%M %p') and previous ('%Y-%m-%d %H:%M:%S') formats.
+    Returns { repo_name: max_utc_datetime }.
+    """
+    watermarks = {}
+    if not os.path.exists(file_path):
+        return watermarks
+
+    supported_formats = [
+        DATE_DISPLAY_FORMAT,
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d %H:%M",
+    ]
+
+    try:
+        wb = openpyxl.load_workbook(file_path, read_only=True)
+        ws = wb[SHEET_NAME] if SHEET_NAME in wb.sheetnames else wb.active
+
+        for row in ws.iter_rows(min_row=2, values_only=True):
+            if not row or len(row) < 4:
+                continue
+            repo = str(row[0] or "").strip()
+            created_at_val = row[3]
+            if not repo or not created_at_val:
+                continue
+
+            dt_gmt7 = None
+            if isinstance(created_at_val, datetime):
+                if created_at_val.tzinfo is None:
+                    dt_gmt7 = created_at_val.replace(tzinfo=TZ_GMT7)
+                else:
+                    dt_gmt7 = created_at_val.astimezone(TZ_GMT7)
+            elif isinstance(created_at_val, str):
+                cleaned_str = created_at_val.strip()
+                for fmt in supported_formats:
+                    try:
+                        parsed = datetime.strptime(cleaned_str, fmt)
+                        dt_gmt7 = parsed.replace(tzinfo=TZ_GMT7)
+                        break
+                    except ValueError:
+                        continue
+
+            if dt_gmt7:
+                utc_dt = dt_gmt7.astimezone(timezone.utc)
+                if repo not in watermarks or utc_dt > watermarks[repo]:
+                    watermarks[repo] = utc_dt
+
+        wb.close()
+    except Exception as e:
+        print(f"[WARN] Error reading watermarks from {file_path}: {e}")
+
+    return watermarks
+
+
+def process_repository(repo: str, token: str, watermark_utc: datetime | None):
     headers = {
         "Authorization": f"Bearer {token}",
         "Accept": "application/vnd.github+json",
@@ -86,37 +190,52 @@ def process_repository(repo: str, token: str, since_dt: datetime):
     }
     all_repo_records = []
 
-    # PRs sorted by creation date ascending
-    prs_url = f"https://api.github.com/repos/{repo}/pulls?state=all&sort=created&direction=asc&per_page=50"
-    resp = requests.get(prs_url, headers=headers, timeout=15)
-    if resp.status_code != 200:
-        print(f"Failed to fetch PRs for {repo}: {resp.status_code} - {resp.text}")
-        return all_repo_records
+    # Apply 10-minute safety buffer to prevent race conditions on exact boundary matches
+    cutoff_utc = (watermark_utc - timedelta(minutes=10)) if watermark_utc else None
 
-    prs = resp.json()
+    if cutoff_utc:
+        cutoff_display = cutoff_utc.astimezone(TZ_GMT7).strftime(DATE_DISPLAY_FORMAT)
+        print(f"[{repo}] Latest timestamp (watermark) found. Fetching updates active after {cutoff_display} GMT+7 (buffer applied)")
+    else:
+        print(f"[{repo}] No existing records found. Scanning all Pull Requests from history...")
 
-    for pr in prs:
-        pr_number = pr["number"]
-        default_dev = pr.get("user", {}).get("login", "")
-        pr_messages = []
+    page = 1
+    stop_pagination = False
 
-        # 1. Main PR Reviews (/reviews)
-        reviews_url = f"https://api.github.com/repos/{repo}/pulls/{pr_number}/reviews?per_page=50"
-        r_resp = requests.get(reviews_url, headers=headers, timeout=15)
-        if r_resp.status_code == 200:
-            for rev in r_resp.json():
+    while True:
+        prs_url = f"https://api.github.com/repos/{repo}/pulls?state=all&sort=updated&direction=desc&per_page=100&page={page}"
+        resp = requests.get(prs_url, headers=headers, timeout=20)
+        if resp.status_code != 200:
+            print(f"Failed to fetch PRs for {repo} (page {page}): {resp.status_code} - {resp.text}")
+            break
+
+        prs = resp.json()
+        if not prs or not isinstance(prs, list):
+            break
+
+        for pr in prs:
+            # Check PR update cutoff: GitHub updates 'updated_at' whenever comments or reviews are posted
+            pr_updated_at_str = pr.get("updated_at")
+            if pr_updated_at_str and cutoff_utc:
+                pr_up_utc = datetime.fromisoformat(pr_updated_at_str.replace("Z", "+00:00"))
+                if pr_up_utc < cutoff_utc:
+                    stop_pagination = True
+                    break
+
+            pr_number = pr["number"]
+            default_dev = pr.get("user", {}).get("login", "")
+
+            # 1. Main PR Reviews (/reviews) - paginated across all available pages
+            reviews = fetch_all_pages(f"https://api.github.com/repos/{repo}/pulls/{pr_number}/reviews", headers)
+            for rev in reviews:
                 body = (rev.get("body") or "").strip()
                 if not body:
                     continue
 
                 submitted_at_str = rev.get("submitted_at")
-                if submitted_at_str:
-                    sub_dt = datetime.fromisoformat(submitted_at_str.replace("Z", "+00:00"))
-                    if sub_dt < since_dt:
-                        continue
-                else:
-                    sub_dt = datetime.min.replace(tzinfo=timezone.utc)
-                    submitted_at_str = ""
+                sub_utc, display_gmt7 = parse_github_datetime(submitted_at_str)
+                if cutoff_utc and sub_utc < cutoff_utc:
+                    continue
 
                 commit_sha = rev.get("commit_id") or pr.get("head", {}).get("sha", "")
                 commit_info = get_commit_details(repo, commit_sha, headers)
@@ -127,12 +246,12 @@ def process_repository(repo: str, token: str, since_dt: datetime):
                 )
                 commit_msg = commit_info.get("commit", {}).get("message", "")
 
-                pr_messages.append({
-                    "raw_dt": sub_dt,
+                all_repo_records.append({
+                    "raw_dt": sub_utc,
                     "repo_name": repo,
                     "commit_id": commit_sha,
                     "dev_name": dev_name,
-                    "created_at": submitted_at_str.replace("T", " ").replace("Z", ""),
+                    "created_at": display_gmt7,
                     "commit_content": commit_msg,
                     "reviewer_name": rev.get("user", {}).get("login", ""),
                     "reviewer_comment": body,
@@ -141,19 +260,13 @@ def process_repository(repo: str, token: str, since_dt: datetime):
                     "review_state": rev.get("state", ""),
                 })
 
-        # 2. Line-Specific Comments (/comments)
-        comments_url = f"https://api.github.com/repos/{repo}/pulls/{pr_number}/comments?per_page=100"
-        c_resp = requests.get(comments_url, headers=headers, timeout=15)
-        if c_resp.status_code == 200:
-            for c in c_resp.json():
+            # 2. Line-Specific Comments (/comments) - paginated across all available pages
+            comments = fetch_all_pages(f"https://api.github.com/repos/{repo}/pulls/{pr_number}/comments", headers)
+            for c in comments:
                 created_at_str = c.get("created_at")
-                if created_at_str:
-                    c_dt = datetime.fromisoformat(created_at_str.replace("Z", "+00:00"))
-                    if c_dt < since_dt:
-                        continue
-                else:
-                    c_dt = datetime.min.replace(tzinfo=timezone.utc)
-                    created_at_str = ""
+                c_utc, display_gmt7 = parse_github_datetime(created_at_str)
+                if cutoff_utc and c_utc < cutoff_utc:
+                    continue
 
                 commit_sha = c.get("commit_id") or pr.get("head", {}).get("sha", "")
                 commit_info = get_commit_details(repo, commit_sha, headers)
@@ -175,12 +288,12 @@ def process_repository(repo: str, token: str, since_dt: datetime):
                 else:
                     loc = path
 
-                pr_messages.append({
-                    "raw_dt": c_dt,
+                all_repo_records.append({
+                    "raw_dt": c_utc,
                     "repo_name": repo,
                     "commit_id": commit_sha,
                     "dev_name": dev_name,
-                    "created_at": created_at_str.replace("T", " ").replace("Z", ""),
+                    "created_at": display_gmt7,
                     "commit_content": commit_msg,
                     "reviewer_name": c.get("user", {}).get("login", ""),
                     "reviewer_comment": c.get("body", ""),
@@ -189,9 +302,9 @@ def process_repository(repo: str, token: str, since_dt: datetime):
                     "review_state": "—",
                 })
 
-        # Intertwine reviews and comments by time
-        pr_messages.sort(key=lambda item: item["raw_dt"])
-        all_repo_records.extend(pr_messages)
+        if stop_pagination or len(prs) < 100 or "next" not in resp.links:
+            break
+        page += 1
 
     return all_repo_records
 
@@ -208,9 +321,15 @@ def update_excel(file_path: str, records: list):
         ws = wb[SHEET_NAME] if SHEET_NAME in wb.sheetnames else wb.active
         for row in ws.iter_rows(min_row=2, values_only=True):
             if row and len(row) >= 7:
-                # Key: Repo (0) | Commit ID (1) | Reviewer (5) | Created At (3) | Comment (6)
+                created_raw = row[3]
+                if isinstance(created_raw, datetime):
+                    created_str = created_raw.strftime(DATE_DISPLAY_FORMAT)
+                else:
+                    created_str = str(created_raw or "").strip()
+
                 comment_text = str(row[6] or "").strip()
-                key = f"{row[0]}|{row[1]}|{row[5]}|{row[3]}|{comment_text}"
+                # Key: Repo (0) | Commit ID (1) | Reviewer (5) | Created At (3) | Comment (6)
+                key = f"{row[0]}|{row[1]}|{row[5]}|{created_str}|{comment_text}"
                 existing_keys.add(key)
     else:
         wb = openpyxl.Workbook()
@@ -259,14 +378,14 @@ def update_excel(file_path: str, records: list):
         added_count += 1
 
     col_widths = {
-        "A": 28, "B": 22, "C": 16, "D": 20, "E": 30,
+        "A": 28, "B": 22, "C": 16, "D": 24, "E": 30,
         "F": 16, "G": 45, "H": 15, "I": 22, "J": 14
     }
     for col_letter, width in col_widths.items():
         ws.column_dimensions[col_letter].width = width
 
     wb.save(file_path)
-    print(f"Excel sync complete: {added_count} records added.")
+    print(f"Excel sync complete: {added_count} new records added.")
 
 
 def main():
@@ -275,8 +394,6 @@ def main():
     svn_url = os.getenv("SVN_URL")
     svn_user = os.getenv("SVN_USER", "")
     svn_pass = os.getenv("SVN_PASS", "")
-
-
 
     if not github_token:
         print("[ERROR] GITHUB_TOKEN environment variable not set.", file=sys.stderr)
@@ -293,8 +410,14 @@ def main():
     print("==> Step 1: Syncing SVN Working Directory...")
     sync_svn(work_dir, svn_url, svn_user, svn_pass)
 
-    print("==> Step 2: Fetching GitHub Review Logs...")
-    since_dt = datetime.now(timezone.utc) - timedelta(days=7)
+    excel_path = os.path.join(work_dir, EXCEL_FILE_NAME)
+    print(f"==> Step 2: Reading existing review timestamps (watermarks) from {excel_path}...")
+    watermarks = get_repo_watermarks(excel_path)
+    for r, wm in watermarks.items():
+        wm_display = wm.astimezone(TZ_GMT7).strftime(DATE_DISPLAY_FORMAT)
+        print(f"    - {r}: Latest review timestamp = {wm_display} (GMT+7)")
+
+    print("==> Step 3: Fetching GitHub Review Logs...")
     all_records = []
 
     for repo_raw in repo_list_env.split(","):
@@ -302,16 +425,17 @@ def main():
         if not repo:
             continue
         print(f"Processing repository: {repo}")
-        records = process_repository(repo, github_token, since_dt)
+        repo_watermark = watermarks.get(repo)
+        records = process_repository(repo, github_token, repo_watermark)
         all_records.extend(records)
 
-    print(f"==> Total review records collected: {len(all_records)}")
+    print(f"==> Step 4: Sorting {len(all_records)} total review records chronologically (GMT+7)...")
+    all_records.sort(key=lambda item: item["raw_dt"])
 
-    excel_path = os.path.join(work_dir, EXCEL_FILE_NAME)
-    print(f"==> Step 3: Updating Excel file at {excel_path}...")
+    print(f"==> Step 5: Updating Excel file at {excel_path}...")
     update_excel(excel_path, all_records)
 
-    print("==> Step 4: Committing updated Excel to SVN...")
+    print("==> Step 6: Committing updated Excel to SVN...")
     commit_to_svn(work_dir, svn_user, svn_pass)
 
     print("[SUCCESS] Process completed successfully.")
