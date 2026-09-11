@@ -1,5 +1,15 @@
 pipeline {
     agent any
+    
+    options {
+        // Display execution timestamps in console output
+        timestamps()
+    }
+
+    triggers {
+        // Runs every Monday morning between 02:00 and 03:00 GMT+7 (H distributes agent load)
+        cron('H 2 * * 1')
+    }
 
     parameters {
         string(
