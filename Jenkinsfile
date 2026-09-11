@@ -14,16 +14,6 @@ pipeline {
         )
     }
 
-    environment {
-        GITHUB_TOKEN = credentials('github-token')
-        SVN_CREDS    = credentials('svn-credentials')
-        SVN_USER     = "${SVN_CREDS_USR}"
-        SVN_PASS     = "${SVN_CREDS_PSW}"
-
-        REPO_LIST    = "${params.REPO_LIST}"
-        SVN_URL      = "${params.SVN_URL}"
-    }
-
     stages {
         stage('Validate Inputs') {
             steps {
@@ -46,12 +36,17 @@ pipeline {
 
         stage('Execute Review Sync') {
             steps {
-                sh '''
-                    python3 --version
-                    svn --version | head -n 1
+                withCredentials([
+                    string(credentialsId: 'github-token', variable: 'GITHUB_TOKEN'),
+                    usernamePassword(credentialsId: 'svn-credentials', usernameVariable: 'SVN_USER', passwordVariable: 'SVN_PASS')
+                ]) {
+                    sh '''
+                        python3 --version
+                        svn --version | head -n 1
 
-                    python3 sync_reviews.py
-                '''
+                        python3 sync_reviews.py
+                    '''
+                }
             }
         }
     }
