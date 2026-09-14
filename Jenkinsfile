@@ -65,16 +65,24 @@ pipeline {
         stage('3. Execute Review Sync') {
             steps {
                 sh '''
-                    # Export parameters directly into the shell session
-                    export REPO_LIST="${REPO_LIST}"
-                    export GITHUB_TOKEN="${GITHUB_TOKEN}"
-                    export SVN_URL="${SVN_URL}"
-                    export SVN_USER="${SVN_USER}"
-                    export SVN_PASS="${SVN_PASS}"
+                    export PATH="$HOME/.local/bin:$PATH"
 
+                    # 1. Install pip if not present
+                    if ! python3 -m pip --version >/dev/null 2>&1; then
+                        echo "[*] Pip not found, bootstrapping..."
+                        curl -sS https://bootstrap.pypa.io/get-pip.py -o get-pip.py || wget -q https://bootstrap.pypa.io/get-pip.py -O get-pip.py
+                        python3 get-pip.py --user --no-warn-script-location
+                        rm -f get-pip.py
+                    fi
+
+                    # 2. Install required Python packages
+                    python3 -m pip install --user --upgrade requests openpyxl
+
+                    # 3. Print environment info
                     python3 --version
-                    svn --version | head -n 1
+                    svn --version | head -n 1 || true
 
+                    # 4. Run the review sync script
                     python3 sync_reviews.py
                 '''
             }
