@@ -1,6 +1,6 @@
 # Git-to-SVN-IR (GitHub Review Log Collector & SVN Sync)
 
-An automated tool and Jenkins CI/CD pipeline to aggregate code review activities across multiple GitHub repositories, standardize them into a structured Excel report, and sync the output directly to LARION / Bestarion Subversion (SVN) repositories managed via [LARION SVN](https://svn.larion.com).
+An automated tool and Jenkins CI/CD pipeline that aggregates code review activities across multiple GitHub repositories, formats them into a structured Excel tracking report, and synchronizes the output directly to a designated Subversion (SVN) repository path.
 
 ---
 
