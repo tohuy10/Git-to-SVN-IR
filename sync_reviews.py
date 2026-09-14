@@ -400,11 +400,11 @@ def update_excel(file_path: str, records: list):
 
 
 def main():
-    github_token = os.getenv("GITHUB_TOKEN")
-    repo_list_env = os.getenv("REPO_LIST")
-    svn_url = os.getenv("SVN_URL")
-    svn_user = os.getenv("SVN_USER", "")
-    svn_pass = os.getenv("SVN_PASS", "")
+    github_token = (os.getenv("GITHUB_TOKEN") or "").strip()
+    repo_list_env = (os.getenv("REPO_LIST") or "").strip()
+    svn_url = (os.getenv("SVN_URL") or "").strip()
+    svn_user = (os.getenv("SVN_USER") or "").strip()
+    svn_pass = (os.getenv("SVN_PASS") or "").strip()
 
     if not github_token:
         print("[ERROR] GITHUB_TOKEN environment variable not set.", file=sys.stderr)
