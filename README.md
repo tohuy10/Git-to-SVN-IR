@@ -106,7 +106,7 @@ The pipeline is designed to work in locked-down Jenkins environments where devel
 2. Under **General**, select **This project is parameterized**.
 3. Add the following parameters:
 
-| Parameter Type | Name | Default Value | Description |
+| Parameter Type | Name | Example Value | Description |
 |---|---|---|---|
 | **String Parameter** | `REPO_LIST` | `https://github.com/org/repo1, https://github.com/org/repo2` | Comma-separated list of GitHub repositories (URLs or slugs). |
 | **Password Parameter** | `GITHUB_TOKEN` | `ghp_xxxxxxxxxxxx` | GitHub Personal Access Token (`repo` read access). Concealed by Jenkins. |
