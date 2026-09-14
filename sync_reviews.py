@@ -8,6 +8,14 @@ import requests
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment
 
+# ==============================================================================
+# CONFIGURATION
+# ==============================================================================
+# Set to True to scan ALL historical Pull Requests in each repository.
+# Set to False to use incremental syncing only when a Pull Request's "Updated at" is later 
+#  than the latest "Created at" Excel timestamps (watermarks) of each repo.
+SCAN_ALL_PRS = False
+
 EXCEL_FILE_NAME = "Git_Review_Log.xlsx"
 SHEET_NAME = "Review Logs"
 TZ_GMT7 = timezone(timedelta(hours=7))
@@ -94,7 +102,6 @@ def parse_github_datetime(iso_str: str):
     """
     Parses a GitHub UTC ISO string (e.g. 2026-09-11T08:00:00Z).
     Returns a tuple of (utc_datetime_object, gmt7_formatted_string).
-    Example format: '11 Sep, 2026 12:08 AM'
     """
     if not iso_str:
         return datetime.min.replace(tzinfo=timezone.utc), ""
@@ -190,14 +197,18 @@ def process_repository(repo: str, token: str, watermark_utc: datetime | None):
     }
     all_repo_records = []
 
-    # Apply 10-minute safety buffer to prevent race conditions on exact boundary matches
-    cutoff_utc = (watermark_utc - timedelta(minutes=10)) if watermark_utc else None
-
-    if cutoff_utc:
-        cutoff_display = cutoff_utc.astimezone(TZ_GMT7).strftime(DATE_DISPLAY_FORMAT)
-        print(f"[{repo}] Latest timestamp (watermark) found. Fetching updates active after {cutoff_display} GMT+7 (buffer applied)")
+    # If SCAN_ALL_PRS is active, bypass watermark and scan full history
+    if SCAN_ALL_PRS:
+        cutoff_utc = None
+        print(f"[{repo}] Full scan enabled (SCAN_ALL_PRS=True). Scanning all Pull Requests from history...")
     else:
-        print(f"[{repo}] No existing records found. Scanning all Pull Requests from history...")
+        # Apply 10-minute safety buffer to prevent race conditions on exact boundary matches
+        cutoff_utc = (watermark_utc - timedelta(minutes=10)) if watermark_utc else None
+        if cutoff_utc:
+            cutoff_display = cutoff_utc.astimezone(TZ_GMT7).strftime(DATE_DISPLAY_FORMAT)
+            print(f"[{repo}] Watermark found. Fetching updates active after {cutoff_display} GMT+7 (buffer applied)")
+        else:
+            print(f"[{repo}] No existing records found. Scanning all Pull Requests from history...")
 
     page = 1
     stop_pagination = False
@@ -214,7 +225,7 @@ def process_repository(repo: str, token: str, watermark_utc: datetime | None):
             break
 
         for pr in prs:
-            # Check PR update cutoff: GitHub updates 'updated_at' whenever comments or reviews are posted
+            # Check PR update cutoff if watermark filtering is active
             pr_updated_at_str = pr.get("updated_at")
             if pr_updated_at_str and cutoff_utc:
                 pr_up_utc = datetime.fromisoformat(pr_updated_at_str.replace("Z", "+00:00"))
@@ -411,11 +422,16 @@ def main():
     sync_svn(work_dir, svn_url, svn_user, svn_pass)
 
     excel_path = os.path.join(work_dir, EXCEL_FILE_NAME)
-    print(f"==> Step 2: Reading existing review timestamps (watermarks) from {excel_path}...")
-    watermarks = get_repo_watermarks(excel_path)
-    for r, wm in watermarks.items():
-        wm_display = wm.astimezone(TZ_GMT7).strftime(DATE_DISPLAY_FORMAT)
-        print(f"    - {r}: Latest review timestamp = {wm_display} (GMT+7)")
+    watermarks = {}
+
+    if SCAN_ALL_PRS:
+        print("==> [CONFIG] SCAN_ALL_PRS is True: Timestamp (watermark) checking bypassed. Full historical scan active.")
+    else:
+        print(f"==> Step 2: Reading existing review timestamps (watermarks) from {excel_path}...")
+        watermarks = get_repo_watermarks(excel_path)
+        for r, wm in watermarks.items():
+            wm_display = wm.astimezone(TZ_GMT7).strftime(DATE_DISPLAY_FORMAT)
+            print(f"    - {r}: Latest review timestamp = {wm_display} (GMT+7)")
 
     print("==> Step 3: Fetching GitHub Review Logs...")
     all_records = []
@@ -425,7 +441,7 @@ def main():
         if not repo:
             continue
         print(f"Processing repository: {repo}")
-        repo_watermark = watermarks.get(repo)
+        repo_watermark = None if SCAN_ALL_PRS else watermarks.get(repo)
         records = process_repository(repo, github_token, repo_watermark)
         all_records.extend(records)
 
