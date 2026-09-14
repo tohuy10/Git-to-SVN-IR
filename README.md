@@ -110,7 +110,7 @@ The pipeline is designed to work in locked-down Jenkins environments where devel
 |---|---|---|---|
 | **String Parameter** | `REPO_LIST` | `https://github.com/org/repo1, https://github.com/org/repo2` | Comma-separated list of GitHub repositories (URLs or slugs). |
 | **Password Parameter** | `GITHUB_TOKEN` | `ghp_xxxxxxxxxxxx` | GitHub Personal Access Token (`repo` read access). Concealed by Jenkins. |
-| **String Parameter** | `SVN_URL` | `svn://172.16.3.43:3690/company_repo/.../Git_review_log/` | Target SVN directory URL. |
+| **String Parameter** | `SVN_URL` | `svn://172.16.3.43:3690/company_repo/Project_Engineering/6_Review/Git_review_log/` | Target SVN directory URL. |
 | **String Parameter** | `SVN_USER` | `svnuser` | Username for SVN authentication. |
 | **Password Parameter** | `SVN_PASS` | `password123` | Password for SVN authentication. Concealed by Jenkins. |
 
