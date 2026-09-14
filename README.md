@@ -32,7 +32,11 @@ An automated tool and Jenkins CI/CD pipeline to aggregate code review activities
 - **Multi-Repository Aggregation:** Synchronize reviews from multiple GitHub repositories in a single pipeline run.
 - **Unified Chronological Timeline:** Pull Requests and internal discussions are ordered by creation timestamp ascending, intertwining main PR reviews and inline line comments seamlessly.
 - **Accurate Line Citations:** Preserves exact code review file paths and line ranges (e.g., `README.md:L1-L2`).
-- **Composite Key Deduplication:** Avoids duplicate rows while preserving multiple identical comments across distinct timestamps and commits.
+- **Smart Incremental Sync (Watermarking):** Scans the existing Excel sheet on SVN for the latest recorded review date per repository. In normal operation, only PRs updated after that timestamp are fetched, cutting API traffic and execution time.
+- **Full Historical Scan Mode:** Includes an in-code toggle (`SCAN_ALL_PRS`) to bypass watermarks and scan every historical Pull Request whenever a repository is onboarded or needs a full rebuild.
+- **GMT+7 Timezone Normalization:** All UTC timestamps from GitHub are automatically converted to GMT+7 and formatted uniformly as `DD Mon, YYYY HH:MM AM/PM` (e.g., `11 Sep, 2026 12:08 AM`).
+- **Composite Deduplication:** Prevents duplicate rows when resyncing using a composite key:  
+  `Repository | Commit ID | Reviewer Name | Created At | Comment Body`.
 - **Automated SVN Sync:** Automatically checks out, updates, styles, adds, and commits the resulting `.xlsx` document back to the target SVN path.
 - **Jenkins CI/CD Native:** Includes a parameterized declarative `Jenkinsfile` with credentials masking.
 
@@ -52,10 +56,31 @@ The generated Excel workbook contains a styled sheet named **"Review Logs"**:
 | **F** | Reviewer name | GitHub username of the reviewer |
 | **G** | Reviewer comment | The feedback, markdown body, or inline note |
 | **H** | Review Type (Temporary column) | `PR Review` (general) or `Line Specific` (diff comment) |
-| **I** | File Path / Line (Temporary column) | Target file and line location (e.g., `src/main.py:L12`) |
-| **J** | Review State (Temporary column) | PR review state (`COMMENTED`, `APPROVED`, `CHANGES_REQUESTED`) |
+| **I** | File Path / Line (Temporary column) | Target file and line location (e.g., `src/main.py:L12` or `—`) |
+| **J** | Review State (Temporary column) | PR review state (`COMMENTED`, `APPROVED`, `CHANGES_REQUESTED`, or `—`) |
 
 ---
+
+## Configuration & Synchronization Modes
+
+At the top of `sync_reviews.py`, the `SCAN_ALL_PRS` flag controls scan behavior:
+
+```python
+# ==============================================================================
+# CONFIGURATION
+# ==============================================================================
+# Set to True to scan ALL historical Pull Requests in each repository.
+# Set to False to use incremental syncing based on latest Excel timestamps.
+SCAN_ALL_PRS = False
+```
+
+- **`SCAN_ALL_PRS = False` (Default / Production Mode):**  
+  Reads `Git_Review_Log.xlsx` from the SVN working directory and identifies the latest review date for each repository. It applies a 10-minute safety buffer and only fetches PRs updated after that timestamp.
+- **`SCAN_ALL_PRS = True` (Full Rebuild Mode):**  
+  Bypasses Excel timestamp watermarks. Traverses all pages of Pull Requests in repository history. Existing entries in Excel are preserved without duplication thanks to composite key checking.
+
+---
+
 
 ## Prerequisites & Requirements
 
@@ -71,32 +96,39 @@ The generated Excel workbook contains a styled sheet named **"Review Logs"**:
 
 ---
 
-## Environment Variables
-
-The script expects the following environment variables:
-
-| Variable | Description | Example |
-|---|---|---|
-| `GITHUB_TOKEN` | GitHub Personal Access Token (`repo` read access) | `ghp_xxxxxxxxxxxx` |
-| `REPO_LIST` | Comma-separated list of GitHub repositories | `https://github.com/owner/repo1,https://github.com/owner/repo2` |
-| `SVN_URL` | Target SVN directory path URL | `svn://svn.larion.com/company_repo/Project_Engineering/6_Review/Git_review_log/` |
-| `SVN_USER` | SVN authentication username | `svnuser` |
-| `SVN_PASS` | SVN authentication password | `password123` |
-
----
-
 ## Jenkins Pipeline Setup
 
-### 1. Credentials Configuration
-Navigate to **Manage Jenkins** → **Credentials** → **System** → **Global credentials**:
-- **`github-token`**: Type **Secret text** (enter your GitHub personal access token).
-- **`svn-credentials`**: Type **Username with password** (enter your SVN credentials).
+The pipeline is designed to work in locked-down Jenkins environments where developers do not have administrator permissions to add credentials under **Manage Jenkins**.
 
-### 2. Job Configuration
-1. Create a **New Item** → Select **Pipeline**.
-2. Point the pipeline script to this Git repository or paste the provided `Jenkinsfile`.
-3. Run the build once via **Build Now** to register parameters.
-4. Subsequent runs will use **Build with Parameters**, allowing you to supply `REPO_LIST` and `SVN_URL` directly from the web UI.
+### 1. Job-Level Parameter Configuration
+
+1. In Jenkins, open your Pipeline job and click **Configure**.
+2. Under **General**, select **This project is parameterized**.
+3. Add the following parameters:
+
+| Parameter Type | Name | Default Value | Description |
+|---|---|---|---|
+| **String Parameter** | `REPO_LIST` | `https://github.com/org/repo1, https://github.com/org/repo2` | Comma-separated list of GitHub repositories (URLs or slugs). |
+| **Password Parameter** | `GITHUB_TOKEN` | `ghp_xxxxxxxxxxxx` | GitHub Personal Access Token (`repo` read access). Concealed by Jenkins. |
+| **String Parameter** | `SVN_URL` | `svn://172.16.3.43:3690/company_repo/.../Git_review_log/` | Target SVN directory URL. |
+| **String Parameter** | `SVN_USER` | `svnuser` | Username for SVN authentication. |
+| **Password Parameter** | `SVN_PASS` | `password123` | Password for SVN authentication. Concealed by Jenkins. |
+
+4. Under **Build Triggers**, select **Build periodically** and configure the schedule:
+   ```text
+   H 2 * * 1
+   ```
+   *(Runs every Monday between 02:00 and 03:00 GMT+7)*.
+5. Click **Save**.
+
+> **Note on `parameters` in `Jenkinsfile`:**  
+> The `parameters { ... }` block is intentionally omitted/commented out inside the `Jenkinsfile`. If declared in code with empty default values, Jenkins would overwrite your UI-saved concealed passwords on every Git push. Defining parameters via the Jenkins UI keeps passwords permanently encrypted on disk.
+
+### 2. Manual vs. Automated Builds
+
+- **Automated Scheduled Runs (Cron):** Jenkins runs in the background and automatically injects the concealed default passwords saved in the job configuration.
+- **Manual Runs ("Build with Parameters"):** Jenkins also automatically injects the default inputs and passwords saved in the job configuration.
+
 
 ---
 
