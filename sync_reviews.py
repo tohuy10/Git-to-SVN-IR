@@ -47,7 +47,21 @@ def sync_svn(work_dir: str, svn_url: str, user: str, password: str):
     if user:
         auth_args.extend(["--username", user, "--password", password])
 
-    if not os.path.exists(os.path.join(work_dir, ".svn")):
+    needs_fresh_checkout = True
+
+    # Check if a valid SVN working copy already exists
+    if os.path.exists(os.path.join(work_dir, ".svn")):
+        try:
+            # Check what URL the existing folder is actually bound to
+            current_wc_url = run_cmd(["svn", "info", "--show-item", "url", work_dir] + auth_args)
+            if current_wc_url.rstrip("/") == svn_url.rstrip("/"):
+                needs_fresh_checkout = False
+            else:
+                print(f"[INFO] SVN URL changed from '{current_wc_url}' to '{svn_url}'. Performing clean checkout.")
+        except Exception:
+            needs_fresh_checkout = True
+
+    if needs_fresh_checkout:
         if os.path.exists(work_dir):
             import shutil
             shutil.rmtree(work_dir)
