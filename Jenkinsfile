@@ -87,8 +87,8 @@ pipeline {
                     python3 --version
                     svn --version | head -n 1 || true
 
-                    # 4. Run the review sync script
-                    python3 sync_reviews.py
+                    # 4. Run the review sync script unbuffered to ensure real-time logging in Jenkins console
+                    python3 -u sync_reviews.py
                 '''
             }
         }

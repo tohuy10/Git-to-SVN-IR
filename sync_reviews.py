@@ -30,6 +30,8 @@ def normalize_repo_slug(raw: str) -> str:
 
 
 def run_cmd(cmd, cwd=None):
+    # Print the command being run
+    print(f"[RUNNING] {' '.join(cmd)}", flush=True)
     result = subprocess.run(cmd, cwd=cwd, text=True, capture_output=True)
     if result.returncode != 0:
         print(f"[CMD ERROR] {' '.join(cmd)}\nSTDERR: {result.stderr.strip()}", file=sys.stderr)
@@ -57,7 +59,7 @@ def sync_svn(work_dir: str, svn_url: str, user: str, password: str):
             if current_wc_url.rstrip("/") == svn_url.rstrip("/"):
                 needs_fresh_checkout = False
             else:
-                print(f"[INFO] SVN URL changed from '{current_wc_url}' to '{svn_url}'. Performing clean checkout.")
+                print(f"[INFO] SVN URL changed from '{current_wc_url}' to '{svn_url}'. Performing clean checkout.", flush=True)
         except Exception:
             needs_fresh_checkout = True
 
@@ -66,11 +68,11 @@ def sync_svn(work_dir: str, svn_url: str, user: str, password: str):
             import shutil
             shutil.rmtree(work_dir)
         cmd = ["svn", "checkout", svn_url, work_dir] + auth_args
-        print(f"Executing: svn checkout {svn_url} {work_dir}")
+        print(f"Executing: svn checkout {svn_url} {work_dir}", flush=True)
         run_cmd(cmd)
     else:
         cmd = ["svn", "update", work_dir] + auth_args
-        print("Executing: svn update")
+        print("Executing: svn update", flush=True)
         run_cmd(cmd)
 
 
@@ -86,7 +88,7 @@ def commit_to_svn(work_dir: str, user: str, password: str):
 
     status = run_cmd(["svn", "status", EXCEL_FILE_NAME], cwd=work_dir)
     if not status:
-        print("No changes detected in Excel log. Skipping SVN commit.")
+        print("No changes detected in Excel log. Skipping SVN commit.", flush=True)
         return
 
     if status.startswith("?"):
@@ -94,7 +96,7 @@ def commit_to_svn(work_dir: str, user: str, password: str):
 
     commit_cmd = ["svn", "commit", "-m", "[Auto-Sync] Update Git review logs via Jenkins", EXCEL_FILE_NAME] + auth_args
     output = run_cmd(commit_cmd, cwd=work_dir)
-    print(output)
+    print(output, flush=True)
 
 
 def get_commit_details(repo: str, sha: str, headers: dict):
@@ -198,7 +200,7 @@ def get_repo_watermarks(file_path: str) -> dict:
 
         wb.close()
     except Exception as e:
-        print(f"[WARN] Error reading watermarks from {file_path}: {e}")
+        print(f"[WARN] Error reading watermarks from {file_path}: {e}", flush=True)
 
     return watermarks
 
@@ -214,29 +216,32 @@ def process_repository(repo: str, token: str, watermark_utc: datetime | None):
     # If SCAN_ALL_PRS is active, bypass watermark and scan full history
     if SCAN_ALL_PRS:
         cutoff_utc = None
-        print(f"[{repo}] Full scan enabled (SCAN_ALL_PRS=True). Scanning all Pull Requests from history...")
+        print(f"[{repo}] Full scan enabled (SCAN_ALL_PRS=True). Scanning all Pull Requests from history...", flush=True)
     else:
         # Apply 10-minute safety buffer to prevent race conditions on exact boundary matches
         cutoff_utc = (watermark_utc - timedelta(minutes=10)) if watermark_utc else None
         if cutoff_utc:
             cutoff_display = cutoff_utc.astimezone(TZ_GMT7).strftime(DATE_DISPLAY_FORMAT)
-            print(f"[{repo}] Watermark found. Fetching updates active after {cutoff_display} GMT+7 (buffer applied)")
+            print(f"[{repo}] Watermark found in Excel. Fetching updates active after {cutoff_display} GMT+7 (buffer applied)", flush=True)
         else:
-            print(f"[{repo}] No existing records found. Scanning all Pull Requests from history...")
+            print(f"[{repo}] No existing records found in Excel. Scanning all Pull Requests from history...", flush=True)
 
     page = 1
     stop_pagination = False
-
+    pr_per_page = 100
     while True:
-        prs_url = f"https://api.github.com/repos/{repo}/pulls?state=all&sort=updated&direction=desc&per_page=100&page={page}"
+        print(f"[{repo}] Fetching PR page {page} ({pr_per_page} PRs per page)...", flush=True) 
+        prs_url = f"https://api.github.com/repos/{repo}/pulls?state=all&sort=updated&direction=desc&per_page={pr_per_page}&page={page}"
         resp = requests.get(prs_url, headers=headers, timeout=20)
         if resp.status_code != 200:
-            print(f"Failed to fetch PRs for {repo} (page {page}): {resp.status_code} - {resp.text}")
+            print(f"Failed to fetch PRs for {repo} (page {page}): {resp.status_code} - {resp.text}", flush=True)
             break
 
         prs = resp.json()
         if not prs or not isinstance(prs, list):
             break
+
+        print(f"[{repo}] Page {page}: Processing {len(prs)} PRs...", flush=True) 
 
         for pr in prs:
             # Check PR update cutoff if watermark filtering is active
@@ -327,7 +332,9 @@ def process_repository(repo: str, token: str, watermark_utc: datetime | None):
                     "review_state": "—",
                 })
 
-        if stop_pagination or len(prs) < 100 or "next" not in resp.links:
+        print(f"[{repo}] Page {page} done. Total reviews collected so far: {len(all_repo_records)}", flush=True)
+
+        if stop_pagination or len(prs) < pr_per_page or "next" not in resp.links:
             break
         page += 1
 
@@ -410,7 +417,7 @@ def update_excel(file_path: str, records: list):
         ws.column_dimensions[col_letter].width = width
 
     wb.save(file_path)
-    print(f"Excel sync complete: {added_count} new records added.")
+    print(f"Excel sync complete: {added_count} new records added.", flush=True)
 
 
 def main():
@@ -432,43 +439,43 @@ def main():
 
     work_dir = "svn_workdir"
 
-    print("==> Step 1: Syncing SVN Working Directory...")
+    print("==> Step 1: Syncing SVN Working Directory...", flush=True)
     sync_svn(work_dir, svn_url, svn_user, svn_pass)
 
     excel_path = os.path.join(work_dir, EXCEL_FILE_NAME)
     watermarks = {}
 
     if SCAN_ALL_PRS:
-        print("==> [CONFIG] SCAN_ALL_PRS is True: Timestamp (watermark) checking bypassed. Full historical scan active.")
+        print("==> [CONFIG] SCAN_ALL_PRS is True: Timestamp (watermark) checking bypassed. Full historical scan active.", flush=True)
     else:
-        print(f"==> Step 2: Reading existing review timestamps (watermarks) from {excel_path}...")
+        print(f"==> Step 2: Reading existing review timestamps (watermarks) from {excel_path}...", flush=True)
         watermarks = get_repo_watermarks(excel_path)
         for r, wm in watermarks.items():
             wm_display = wm.astimezone(TZ_GMT7).strftime(DATE_DISPLAY_FORMAT)
-            print(f"    - {r}: Latest review timestamp = {wm_display} (GMT+7)")
+            print(f"    - {r}: Latest review timestamp = {wm_display} (GMT+7)", flush=True)
 
-    print("==> Step 3: Fetching GitHub Review Logs...")
+    print("==> Step 3: Fetching GitHub Review Logs...", flush=True)
     all_records = []
 
     for repo_raw in repo_list_env.split(","):
         repo = normalize_repo_slug(repo_raw)
         if not repo:
             continue
-        print(f"Processing repository: {repo}")
+        print(f"Processing repository: {repo}", flush=True)
         repo_watermark = None if SCAN_ALL_PRS else watermarks.get(repo)
         records = process_repository(repo, github_token, repo_watermark)
         all_records.extend(records)
 
-    print(f"==> Step 4: Sorting {len(all_records)} total review records chronologically (GMT+7)...")
+    print(f"==> Step 4: Sorting {len(all_records)} total review records chronologically (GMT+7)...", flush=True)
     all_records.sort(key=lambda item: item["raw_dt"])
 
-    print(f"==> Step 5: Updating Excel file at {excel_path}...")
+    print(f"==> Step 5: Updating Excel file at {excel_path}...", flush=True)
     update_excel(excel_path, all_records)
 
-    print("==> Step 6: Committing updated Excel to SVN...")
+    print("==> Step 6: Committing updated Excel to SVN...", flush=True)
     commit_to_svn(work_dir, svn_user, svn_pass)
 
-    print("[SUCCESS] Process completed successfully.")
+    print("[SUCCESS] Process completed successfully.", flush=True)
 
 
 if __name__ == "__main__":
