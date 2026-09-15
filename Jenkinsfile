@@ -1,9 +1,10 @@
 pipeline {
     agent any
 
-    // options {
-    //     timestamps()
-    // }
+    options {
+        disableConcurrentBuilds()
+        timestamps()
+    }
 
     // NOTE: Comment out 'triggers' in script to avoid wiping out the 
     // UI-configured schedule.
