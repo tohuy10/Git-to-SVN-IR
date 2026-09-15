@@ -104,5 +104,9 @@ pipeline {
         failure {
             echo "Review sync job failed. Check console output for details."
         }
+        cleanup {
+            // Wipe the local SVN checkout so future runs start fresh
+            sh 'rm -rf svn_workdir'
+        }
     }
 }
