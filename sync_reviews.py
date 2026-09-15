@@ -91,17 +91,18 @@ def commit_to_svn(work_dir: str, user: str, password: str):
     print(output, flush=True)
 
 
-def get_commit_details(repo: str, sha: str, headers: dict):
+def get_commit_details(session: requests.Session, repo: str, sha: str):
     if not sha:
         return {}
-    if sha in commit_cache:
-        return commit_cache[sha]
+    cache_key = f"{repo}:{sha}"
+    if cache_key in commit_cache:
+        return commit_cache[cache_key]
 
     url = f"https://api.github.com/repos/{repo}/commits/{sha}"
-    resp = requests.get(url, headers=headers, timeout=15)
+    resp = session.get(url, timeout=15)
     if resp.status_code == 200:
         data = resp.json()
-        commit_cache[sha] = data
+        commit_cache[cache_key] = data
         return data
     return {}
 
@@ -114,12 +115,12 @@ def parse_github_datetime(iso_str: str):
     return utc_dt, gmt7_dt.strftime(DATE_DISPLAY_FORMAT)
 
 
-def fetch_all_pages(base_url: str, headers: dict) -> list:
+def fetch_all_pages(session: requests.Session, base_url: str) -> list:
     items = []
     current_url = f"{base_url}{'&' if '?' in base_url else '?'}per_page=100"
 
     while current_url:
-        resp = requests.get(current_url, headers=headers, timeout=15)
+        resp = session.get(current_url, timeout=15)
         if resp.status_code != 200:
             break
         data = resp.json()
@@ -186,12 +187,10 @@ def compute_cutoff_utc(repo: str, scan_timeframe: str, watermark_utc: datetime |
     now_utc = datetime.now(timezone.utc)
     mode = (scan_timeframe or "").strip().lower()
 
-    # 1. Full history bypass
     if "all" in mode or "every" in mode:
         print(f"[{repo}] Mode: 'All History'. Scanning all Pull Requests...", flush=True)
         return None
 
-    # 2. Incremental Excel watermark check
     if "incremental" in mode or "excel" in mode:
         if watermark_utc:
             cutoff = watermark_utc - timedelta(minutes=10)
@@ -202,7 +201,6 @@ def compute_cutoff_utc(repo: str, scan_timeframe: str, watermark_utc: datetime |
             print(f"[{repo}] Mode: 'Incremental' selected, but no Excel record exists. Scanning all history...", flush=True)
             return None
 
-    # 3. Dynamic Relative Timeframes (1-3 weeks, 1-6 months, 1-2 years, etc.)
     match = re.search(r"(\d+)\s*(day|week|month|year)", mode)
     if match:
         count = int(match.group(1))
@@ -217,7 +215,6 @@ def compute_cutoff_utc(repo: str, scan_timeframe: str, watermark_utc: datetime |
             days = count * 365
         cutoff = now_utc - timedelta(days=days)
     else:
-        # Fallback default: 1 week (7 days)
         cutoff = now_utc - timedelta(days=7)
 
     cutoff_disp = cutoff.astimezone(TZ_GMT7).strftime(DATE_DISPLAY_FORMAT)
@@ -225,14 +222,8 @@ def compute_cutoff_utc(repo: str, scan_timeframe: str, watermark_utc: datetime |
     return cutoff
 
 
-def process_repository(repo: str, token: str, watermark_utc: datetime | None, scan_timeframe: str):
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Accept": "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-    }
+def process_repository(session: requests.Session, repo: str, watermark_utc: datetime | None, scan_timeframe: str):
     all_repo_records = []
-
     cutoff_utc = compute_cutoff_utc(repo, scan_timeframe, watermark_utc)
 
     page = 1
@@ -242,7 +233,7 @@ def process_repository(repo: str, token: str, watermark_utc: datetime | None, sc
     while True:
         print(f"[{repo}] Fetching PR page {page} ({pr_per_page} PRs per page)...", flush=True)
         prs_url = f"https://api.github.com/repos/{repo}/pulls?state=all&sort=updated&direction=desc&per_page={pr_per_page}&page={page}"
-        resp = requests.get(prs_url, headers=headers, timeout=20)
+        resp = session.get(prs_url, timeout=20)
         if resp.status_code != 200:
             print(f"Failed to fetch PRs for {repo} (page {page}): {resp.status_code} - {resp.text}", flush=True)
             break
@@ -251,8 +242,7 @@ def process_repository(repo: str, token: str, watermark_utc: datetime | None, sc
         if not prs or not isinstance(prs, list):
             break
 
-        print(f"[{repo}] Page {page}: Processing {len(prs)} PRs...", flush=True)
-
+        prs_scanned = 0
         for pr in prs:
             pr_updated_at_str = pr.get("updated_at")
             if pr_updated_at_str and cutoff_utc:
@@ -261,11 +251,12 @@ def process_repository(repo: str, token: str, watermark_utc: datetime | None, sc
                     stop_pagination = True
                     break
 
+            prs_scanned += 1
             pr_number = pr["number"]
             default_dev = pr.get("user", {}).get("login", "")
 
             # 1. Main PR Reviews (/reviews)
-            reviews = fetch_all_pages(f"https://api.github.com/repos/{repo}/pulls/{pr_number}/reviews", headers)
+            reviews = fetch_all_pages(session, f"https://api.github.com/repos/{repo}/pulls/{pr_number}/reviews")
             for rev in reviews:
                 body = (rev.get("body") or "").strip()
                 if not body:
@@ -276,13 +267,12 @@ def process_repository(repo: str, token: str, watermark_utc: datetime | None, sc
                     continue
 
                 commit_sha = rev.get("commit_id") or pr.get("head", {}).get("sha", "")
-                commit_info = get_commit_details(repo, commit_sha, headers)
+                commit_info = get_commit_details(session, repo, commit_sha)
 
-                dev_name = (
-                    commit_info.get("commit", {}).get("author", {}).get("name")
-                    or default_dev
-                )
-                commit_msg = commit_info.get("commit", {}).get("message", "")
+                commit_obj = commit_info.get("commit") or {}
+                author_obj = commit_obj.get("author") or {}
+                dev_name = author_obj.get("name") or default_dev
+                commit_msg = commit_obj.get("message", "")
 
                 all_repo_records.append({
                     "raw_dt": sub_utc,
@@ -299,25 +289,21 @@ def process_repository(repo: str, token: str, watermark_utc: datetime | None, sc
                 })
 
             # 2. Line-Specific Comments (/comments)
-            comments = fetch_all_pages(f"https://api.github.com/repos/{repo}/pulls/{pr_number}/comments", headers)
+            comments = fetch_all_pages(session, f"https://api.github.com/repos/{repo}/pulls/{pr_number}/comments")
             for c in comments:
                 c_utc, display_gmt7 = parse_github_datetime(c.get("created_at"))
                 if cutoff_utc and c_utc < cutoff_utc:
                     continue
 
                 commit_sha = c.get("commit_id") or pr.get("head", {}).get("sha", "")
-                commit_info = get_commit_details(repo, commit_sha, headers)
+                commit_info = get_commit_details(session, repo, commit_sha)
 
-                dev_name = (
-                    commit_info.get("commit", {}).get("author", {}).get("name")
-                    or default_dev
-                )
-                commit_msg = commit_info.get("commit", {}).get("message", "")
+                commit_obj = commit_info.get("commit") or {}
+                author_obj = commit_obj.get("author") or {}
+                dev_name = author_obj.get("name") or default_dev
+                commit_msg = commit_obj.get("message", "")
 
                 path = c.get("path", "")
-
-                # Fall back to original_line if line is null (e.g. outdated/resolved comments)
-                # can choose to not fall back to original line number if outdated comment line number is not useful
                 line = c.get("line") or c.get("original_line")
                 start_line = c.get("start_line") or c.get("original_start_line")
 
@@ -342,7 +328,7 @@ def process_repository(repo: str, token: str, watermark_utc: datetime | None, sc
                     "review_state": "—",
                 })
 
-        print(f"[{repo}] Page {page} done. Total reviews collected so far: {len(all_repo_records)}", flush=True)
+        print(f"[{repo}] Page {page} done (scanned {prs_scanned} PRs within window). Total reviews collected: {len(all_repo_records)}", flush=True)
 
         if stop_pagination or len(prs) < pr_per_page or "next" not in resp.links:
             break
@@ -447,6 +433,14 @@ def main():
         print("[ERROR] SVN_URL environment variable not set.", file=sys.stderr)
         sys.exit(1)
 
+    # Initialize reusable HTTP session with connection pooling
+    session = requests.Session()
+    session.headers.update({
+        "Authorization": f"Bearer {github_token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    })
+
     work_dir = "svn_workdir"
 
     print("==> Step 1: Syncing SVN Working Directory...", flush=True)
@@ -471,7 +465,7 @@ def main():
             continue
         print(f"Processing repository: {repo}", flush=True)
         repo_watermark = watermarks.get(repo)
-        records = process_repository(repo, github_token, repo_watermark, scan_timeframe)
+        records = process_repository(session, repo, repo_watermark, scan_timeframe)
         all_records.extend(records)
 
     print(f"==> Step 4: Sorting {len(all_records)} total review records chronologically (GMT+7)...", flush=True)
