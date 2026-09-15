@@ -6,15 +6,13 @@ pipeline {
         timestamps()
     }
 
-    // NOTE: Comment out 'triggers' in script to avoid wiping out the 
-    // UI-configured schedule.
+    // NOTE: Comment out 'triggers' in script to avoid wiping out the UI-configured schedule.
     // triggers {
     //     // Runs every Monday morning between 02:00 and 03:00 GMT+7
     //     cron('H 2 * * 1')
     // }
     
-    // NOTE: 'parameters' block commented out so Jenkins does NOT 
-    // wipe the UI-configured default passwords on weekly runs.
+    // NOTE: 'parameters' block commented out so Jenkins does NOT wipe the UI-configured default passwords on weekly runs.
     // parameters {
     //     string(
     //         name: 'REPO_LIST',
@@ -53,10 +51,14 @@ pipeline {
                     if (!params.GITHUB_TOKEN?.toString()?.trim()) {
                         error("Parameter GITHUB_TOKEN must not be empty.")
                     }
-
                     if (!params.SVN_URL?.trim()) {
                         error("Parameter SVN_URL must not be empty.")
                     }
+
+                    def selectedTimeframe = params.SCAN_TIMEFRAME ?: '1 week'
+                    echo "=========================================="
+                    echo "Selected Scan Timeframe: ${selectedTimeframe}"
+                    echo "=========================================="
                 }
             }
         }
@@ -87,7 +89,10 @@ pipeline {
                     python3 --version
                     svn --version | head -n 1 || true
 
-                    # 4. Run the review sync script unbuffered to ensure real-time logging in Jenkins console
+                    # 4. Pass selected timeframe to Python (defaults to 1 week if unset)
+                    export SCAN_TIMEFRAME="${SCAN_TIMEFRAME:-1 week}"
+
+                    # 5. Run the review sync script unbuffered to ensure real-time logging in Jenkins console
                     python3 -u sync_reviews.py
                 '''
             }
@@ -96,7 +101,7 @@ pipeline {
 
     post {
         always {
-            // Archive the generated Excel log so you can download it directly from the Jenkins UI
+            // Archive the generated Excel log so you can download it directly from the Jenkins UI 
             archiveArtifacts artifacts: 'svn_workdir/*.xlsx', allowEmptyArchive: true
         }
         success {
@@ -106,7 +111,7 @@ pipeline {
             echo "Review sync job failed. Check console output for details."
         }
         cleanup {
-            // Wipe the local SVN checkout so future runs start fresh
+            // Wipe the local SVN checkout so future runs start fresh 
             sh 'rm -rf svn_workdir'
         }
     }

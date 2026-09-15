@@ -11,11 +11,6 @@ from openpyxl.styles import Font, PatternFill, Alignment
 # ==============================================================================
 # CONFIGURATION
 # ==============================================================================
-# Set to True to scan ALL historical Pull Requests in each repository.
-# Set to False to use incremental syncing only when a Pull Request's "Updated at" is later 
-#  than the latest "Created at" Excel timestamps (watermarks) of each repo.
-SCAN_ALL_PRS = False
-
 EXCEL_FILE_NAME = "Git_Review_Log.xlsx"
 SHEET_NAME = "Review Logs"
 TZ_GMT7 = timezone(timedelta(hours=7))
@@ -30,11 +25,10 @@ def normalize_repo_slug(raw: str) -> str:
 
 
 def run_cmd(cmd, cwd=None):
-    # Print the command being run
     print(f"[RUNNING] {' '.join(cmd)}", flush=True)
     result = subprocess.run(cmd, cwd=cwd, text=True, capture_output=True)
     if result.returncode != 0:
-        print(f"[CMD ERROR] {' '.join(cmd)}\nSTDERR: {result.stderr.strip()}", file=sys.stderr)
+        print(f"[CMD ERROR] {' '.join(cmd)}\nSTDERR: {result.stderr.strip()}", file=sys.stderr, flush=True)
         raise subprocess.CalledProcessError(result.returncode, cmd, result.stdout, result.stderr)
     return result.stdout.strip()
 
@@ -51,10 +45,8 @@ def sync_svn(work_dir: str, svn_url: str, user: str, password: str):
 
     needs_fresh_checkout = True
 
-    # Check if a valid SVN working copy already exists
     if os.path.exists(os.path.join(work_dir, ".svn")):
         try:
-            # Check what URL the existing folder is actually bound to
             current_wc_url = run_cmd(["svn", "info", "--show-item", "url", work_dir] + auth_args)
             if current_wc_url.rstrip("/") == svn_url.rstrip("/"):
                 needs_fresh_checkout = False
@@ -115,10 +107,6 @@ def get_commit_details(repo: str, sha: str, headers: dict):
 
 
 def parse_github_datetime(iso_str: str):
-    """
-    Parses a GitHub UTC ISO string (e.g. 2026-09-11T08:00:00Z).
-    Returns a tuple of (utc_datetime_object, gmt7_formatted_string).
-    """
     if not iso_str:
         return datetime.min.replace(tzinfo=timezone.utc), ""
     utc_dt = datetime.fromisoformat(iso_str.replace("Z", "+00:00"))
@@ -127,10 +115,6 @@ def parse_github_datetime(iso_str: str):
 
 
 def fetch_all_pages(base_url: str, headers: dict) -> list:
-    """
-    Traverses GitHub's RFC 5988 pagination headers (Link: rel='next').
-    Only makes multiple calls if total items exceed per_page (100).
-    """
     items = []
     current_url = f"{base_url}{'&' if '?' in base_url else '?'}per_page=100"
 
@@ -142,19 +126,12 @@ def fetch_all_pages(base_url: str, headers: dict) -> list:
         if not isinstance(data, list):
             break
         items.extend(data)
-
-        # Follow next page URL from Link header if present
         current_url = resp.links.get("next", {}).get("url")
 
     return items
 
 
 def get_repo_watermarks(file_path: str) -> dict:
-    """
-    Scans the existing Excel file to extract the latest review timestamp per repository.
-    Supports both new ('%d %b, %Y %I:%M %p') and previous ('%Y-%m-%d %H:%M:%S') formats.
-    Returns { repo_name: max_utc_datetime }.
-    """
     watermarks = {}
     if not os.path.exists(file_path):
         return watermarks
@@ -205,7 +182,50 @@ def get_repo_watermarks(file_path: str) -> dict:
     return watermarks
 
 
-def process_repository(repo: str, token: str, watermark_utc: datetime | None):
+def compute_cutoff_utc(repo: str, scan_timeframe: str, watermark_utc: datetime | None) -> datetime | None:
+    now_utc = datetime.now(timezone.utc)
+    mode = (scan_timeframe or "").strip().lower()
+
+    # 1. Full history bypass
+    if "all" in mode or "every" in mode:
+        print(f"[{repo}] Mode: 'All History'. Scanning all Pull Requests...", flush=True)
+        return None
+
+    # 2. Incremental Excel watermark check
+    if "incremental" in mode or "excel" in mode:
+        if watermark_utc:
+            cutoff = watermark_utc - timedelta(minutes=10)
+            cutoff_disp = cutoff.astimezone(TZ_GMT7).strftime(DATE_DISPLAY_FORMAT)
+            print(f"[{repo}] Mode: 'Incremental'. Watermark found in Excel: fetching PRs active after {cutoff_disp} GMT+7", flush=True)
+            return cutoff
+        else:
+            print(f"[{repo}] Mode: 'Incremental' selected, but no Excel record exists. Scanning all history...", flush=True)
+            return None
+
+    # 3. Dynamic Relative Timeframes (1-3 weeks, 1-6 months, 1-2 years, etc.)
+    match = re.search(r"(\d+)\s*(day|week|month|year)", mode)
+    if match:
+        count = int(match.group(1))
+        unit = match.group(2)
+        if unit == "day":
+            days = count
+        elif unit == "week":
+            days = count * 7
+        elif unit == "month":
+            days = count * 30
+        elif unit == "year":
+            days = count * 365
+        cutoff = now_utc - timedelta(days=days)
+    else:
+        # Fallback default: 1 week (7 days)
+        cutoff = now_utc - timedelta(days=7)
+
+    cutoff_disp = cutoff.astimezone(TZ_GMT7).strftime(DATE_DISPLAY_FORMAT)
+    print(f"[{repo}] Mode: '{scan_timeframe}'. Scanning PRs active after {cutoff_disp} GMT+7", flush=True)
+    return cutoff
+
+
+def process_repository(repo: str, token: str, watermark_utc: datetime | None, scan_timeframe: str):
     headers = {
         "Authorization": f"Bearer {token}",
         "Accept": "application/vnd.github+json",
@@ -213,24 +233,14 @@ def process_repository(repo: str, token: str, watermark_utc: datetime | None):
     }
     all_repo_records = []
 
-    # If SCAN_ALL_PRS is active, bypass watermark and scan full history
-    if SCAN_ALL_PRS:
-        cutoff_utc = None
-        print(f"[{repo}] Full scan enabled (SCAN_ALL_PRS=True). Scanning all Pull Requests from history...", flush=True)
-    else:
-        # Apply 10-minute safety buffer to prevent race conditions on exact boundary matches
-        cutoff_utc = (watermark_utc - timedelta(minutes=10)) if watermark_utc else None
-        if cutoff_utc:
-            cutoff_display = cutoff_utc.astimezone(TZ_GMT7).strftime(DATE_DISPLAY_FORMAT)
-            print(f"[{repo}] Watermark found in Excel. Fetching updates active after {cutoff_display} GMT+7 (buffer applied)", flush=True)
-        else:
-            print(f"[{repo}] No existing records found in Excel. Scanning all Pull Requests from history...", flush=True)
+    cutoff_utc = compute_cutoff_utc(repo, scan_timeframe, watermark_utc)
 
     page = 1
     stop_pagination = False
     pr_per_page = 100
+
     while True:
-        print(f"[{repo}] Fetching PR page {page} ({pr_per_page} PRs per page)...", flush=True) 
+        print(f"[{repo}] Fetching PR page {page} ({pr_per_page} PRs per page)...", flush=True)
         prs_url = f"https://api.github.com/repos/{repo}/pulls?state=all&sort=updated&direction=desc&per_page={pr_per_page}&page={page}"
         resp = requests.get(prs_url, headers=headers, timeout=20)
         if resp.status_code != 200:
@@ -241,10 +251,9 @@ def process_repository(repo: str, token: str, watermark_utc: datetime | None):
         if not prs or not isinstance(prs, list):
             break
 
-        print(f"[{repo}] Page {page}: Processing {len(prs)} PRs...", flush=True) 
+        print(f"[{repo}] Page {page}: Processing {len(prs)} PRs...", flush=True)
 
         for pr in prs:
-            # Check PR update cutoff if watermark filtering is active
             pr_updated_at_str = pr.get("updated_at")
             if pr_updated_at_str and cutoff_utc:
                 pr_up_utc = datetime.fromisoformat(pr_updated_at_str.replace("Z", "+00:00"))
@@ -255,15 +264,14 @@ def process_repository(repo: str, token: str, watermark_utc: datetime | None):
             pr_number = pr["number"]
             default_dev = pr.get("user", {}).get("login", "")
 
-            # 1. Main PR Reviews (/reviews) - paginated across all available pages
+            # 1. Main PR Reviews (/reviews)
             reviews = fetch_all_pages(f"https://api.github.com/repos/{repo}/pulls/{pr_number}/reviews", headers)
             for rev in reviews:
                 body = (rev.get("body") or "").strip()
                 if not body:
                     continue
 
-                submitted_at_str = rev.get("submitted_at")
-                sub_utc, display_gmt7 = parse_github_datetime(submitted_at_str)
+                sub_utc, display_gmt7 = parse_github_datetime(rev.get("submitted_at"))
                 if cutoff_utc and sub_utc < cutoff_utc:
                     continue
 
@@ -290,11 +298,10 @@ def process_repository(repo: str, token: str, watermark_utc: datetime | None):
                     "review_state": rev.get("state", ""),
                 })
 
-            # 2. Line-Specific Comments (/comments) - paginated across all available pages
+            # 2. Line-Specific Comments (/comments)
             comments = fetch_all_pages(f"https://api.github.com/repos/{repo}/pulls/{pr_number}/comments", headers)
             for c in comments:
-                created_at_str = c.get("created_at")
-                c_utc, display_gmt7 = parse_github_datetime(created_at_str)
+                c_utc, display_gmt7 = parse_github_datetime(c.get("created_at"))
                 if cutoff_utc and c_utc < cutoff_utc:
                     continue
 
@@ -360,7 +367,6 @@ def update_excel(file_path: str, records: list):
                     created_str = str(created_raw or "").strip()
 
                 comment_text = str(row[6] or "").strip()
-                # Key: Repo (0) | Commit ID (1) | Reviewer (5) | Created At (3) | Comment (6)
                 key = f"{row[0]}|{row[1]}|{row[5]}|{created_str}|{comment_text}"
                 existing_keys.add(key)
     else:
@@ -426,6 +432,7 @@ def main():
     svn_url = (os.getenv("SVN_URL") or "").strip()
     svn_user = (os.getenv("SVN_USER") or "").strip()
     svn_pass = (os.getenv("SVN_PASS") or "").strip()
+    scan_timeframe = (os.getenv("SCAN_TIMEFRAME") or "1 week").strip()
 
     if not github_token:
         print("[ERROR] GITHUB_TOKEN environment variable not set.", file=sys.stderr)
@@ -445,10 +452,8 @@ def main():
     excel_path = os.path.join(work_dir, EXCEL_FILE_NAME)
     watermarks = {}
 
-    if SCAN_ALL_PRS:
-        print("==> [CONFIG] SCAN_ALL_PRS is True: Timestamp (watermark) checking bypassed. Full historical scan active.", flush=True)
-    else:
-        print(f"==> Step 2: Reading existing review timestamps (watermarks) from {excel_path}...", flush=True)
+    print(f"==> Step 2: Evaluating scan timeframe: '{scan_timeframe}'...", flush=True)
+    if "incremental" in scan_timeframe.lower() or "excel" in scan_timeframe.lower():
         watermarks = get_repo_watermarks(excel_path)
         for r, wm in watermarks.items():
             wm_display = wm.astimezone(TZ_GMT7).strftime(DATE_DISPLAY_FORMAT)
@@ -462,8 +467,8 @@ def main():
         if not repo:
             continue
         print(f"Processing repository: {repo}", flush=True)
-        repo_watermark = None if SCAN_ALL_PRS else watermarks.get(repo)
-        records = process_repository(repo, github_token, repo_watermark)
+        repo_watermark = watermarks.get(repo)
+        records = process_repository(repo, github_token, repo_watermark, scan_timeframe)
         all_records.extend(records)
 
     print(f"==> Step 4: Sorting {len(all_records)} total review records chronologically (GMT+7)...", flush=True)
