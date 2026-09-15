@@ -315,7 +315,10 @@ def process_repository(repo: str, token: str, watermark_utc: datetime | None, sc
                 commit_msg = commit_info.get("commit", {}).get("message", "")
 
                 path = c.get("path", "")
-                line = c.get("line")
+
+                # Fall back to original_line if line is null (e.g. outdated/resolved comments)
+                # can choose to not fall back to original line number if outdated comment line number is not useful
+                line = c.get("line") or c.get("original_line")
                 start_line = c.get("start_line")
 
                 if start_line and line and start_line != line:
