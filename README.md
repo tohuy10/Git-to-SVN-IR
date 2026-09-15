@@ -51,7 +51,7 @@ The generated Excel workbook contains a styled sheet named **"Review Logs"**:
 | **A** | Repository | Repository slug (`owner/repo`) |
 | **B** | Commit ID | Git commit SHA targeted by the review |
 | **C** | Dev name | PR author / commit author name |
-| **D** | Created at | Timestamp when review or comment was submitted (UTC) |
+| **D** | Created at | Timestamp when review or comment was submitted (GMT+7) |
 | **E** | Commit content | Git commit message |
 | **F** | Reviewer name | GitHub username of the reviewer |
 | **G** | Reviewer comment | The feedback, markdown body, or inline note |
