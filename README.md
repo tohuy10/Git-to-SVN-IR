@@ -29,15 +29,18 @@ An automated tool and Jenkins CI/CD pipeline that aggregates code review activit
 
 ## Features
 
-- **Multi-Repository Aggregation:** Synchronize reviews from multiple GitHub repositories in a single pipeline run.
+- **Multi-Repository Ingestion:** Aggregates logs across multiple repositories in a single run. Supports SSH (`git@github.com:...`), HTTPS URLs, and plain `owner/repo` slugs with automatic whitespace normalization.
 - **Unified Chronological Timeline:** Pull Requests and internal discussions are ordered by creation timestamp ascending, intertwining main PR reviews and inline line comments seamlessly.
-- **Accurate Line Citations:** Preserves exact code review file paths and line ranges (e.g., `README.md:L1-L2`).
-- **Smart Incremental Sync (Watermarking):** Scans the existing Excel sheet on SVN for the latest recorded review date per repository. In normal operation, only PRs updated after that timestamp are fetched, cutting API traffic and execution time.
+- **Dynamic Scan Timeframes:** Choose flexible collection windows on demand (`1 week`, `2 weeks`, `3 weeks`, `1 month`, `2 months`, `3 months`, `6 months`, `1 year`, `2 years`, `All History`, or `Incremental`).
+- **Smart Incremental Sync (Watermarking):** Scans the existing Excel sheet on SVN for the latest recorded review date per repository. Fetches only PRs updated after that timestamp with a 10-minute safety buffer.
+- **Persistent Outdated Line Citations:** Captures multi-line and single-line comment positions (e.g., `src/index.ts:L45` or `src/api.py:L10-L18`). Automatically falls back to `original_line` and `original_start_line`
+so line references survive even after code is modified or threads are resolved.
+- **HTTP Connection Pooling:** Uses a shared, pooled `requests.Session()` with HTTP Keep-Alive, significantly reducing TLS handshake overhead and network latency across hundreds of GitHub API requests.
 - **Full Historical Scan Mode:** Includes an in-code toggle (`SCAN_ALL_PRS`) to bypass watermarks and scan every historical Pull Request whenever a repository is onboarded or needs a full rebuild.
 - **GMT+7 Timezone Normalization:** All UTC timestamps from GitHub are automatically converted to GMT+7 and formatted uniformly as `DD Mon, YYYY HH:MM AM/PM` (e.g., `11 Sep, 2026 12:08 AM`).
 - **Composite Deduplication:** Prevents duplicate rows when resyncing using a composite key:  
   `Repository | Commit ID | Reviewer Name | Created At | Comment Body`.
-- **Automated SVN Sync:** Automatically checks out, updates, styles, adds, and commits the resulting `.xlsx` document back to the target SVN path.
+- **Self-Healing SVN Working Copy:** Verifies remote repository URLs via `svn info` before syncing. Automatically wipes and checks out a fresh copy if target paths or branches change, preventing SVN metadata collisions.
 - **Jenkins CI/CD Native:** Includes a parameterized declarative `Jenkinsfile` with credentials masking.
 
 ---
@@ -61,23 +64,16 @@ The generated Excel workbook contains a styled sheet named **"Review Logs"**:
 
 ---
 
-## Configuration & Synchronization Modes
+## Synchronization Modes & Timeframes
 
-At the top of `sync_reviews.py`, the `SCAN_ALL_PRS` flag controls scan behavior:
+Scan windows are determined dynamically by the `SCAN_TIMEFRAME` parameter:
 
-```python
-# ==============================================================================
-# CONFIGURATION
-# ==============================================================================
-# Set to True to scan ALL historical Pull Requests in each repository.
-# Set to False to use incremental syncing based on latest Excel timestamps.
-SCAN_ALL_PRS = False
-```
-
-- **`SCAN_ALL_PRS = False` (Default / Production Mode):**  
-  Reads `Git_Review_Log.xlsx` from the SVN working directory and identifies the latest review date for each repository. It applies a 10-minute safety buffer and only fetches PRs updated after that timestamp.
-- **`SCAN_ALL_PRS = True` (Full Rebuild Mode):**  
-  Bypasses Excel timestamp watermarks. Traverses all pages of Pull Requests in repository history. Existing entries in Excel are preserved without duplication thanks to composite key checking.
+* **Relative Time Windows (Default: `1 week`):**  
+  Computes a cutoff date based on current time (e.g., `1 week` $\rightarrow$ past 7 days, `1 month` $\rightarrow$ past 30 days, `1 year` $\rightarrow$ past 365 days). Inspects all PRs updated after the cutoff.
+* **`Incremental (from latest auto-detected Excel Timestamp)`:**  
+  Reads `Git_Review_Log.xlsx` directly from the SVN working directory, extracts the latest timestamp per repository, and fetches only newer PR updates.
+* **`All History`:**  
+  Traverses all pages of Pull Requests across repository history. Useful for initial repository onboarding or total report rebuilds.
 
 ---
 
@@ -113,6 +109,7 @@ The pipeline is designed to work in locked-down Jenkins environments where devel
 | **String Parameter** | `SVN_URL` | `svn://172.16.3.43:3690/company_repo/Project_Engineering/6_Review/Git_review_log/` | Target SVN directory URL. |
 | **String Parameter** | `SVN_USER` | `svnuser` | Username for SVN authentication. |
 | **Password Parameter** | `SVN_PASS` | `password123` | Password for SVN authentication. Concealed by Jenkins. |
+| **Choice Parameter** | `SCAN_TIMEFRAME` | `1 week`<br>`2 weeks`<br>`3 weeks`<br>`1 month`<br>`2 months`<br>`3 months`<br>`6 months`<br>`1 year`<br>`2 years`<br>`All History`<br>`Incremental (from latest auto-detected Excel Timestamp)` | Select review scan timeframe. `1 week` (first item) is the default for automated runs. |
 
 4. Under **Build Triggers**, select **Build periodically** and configure the schedule:
    ```text
@@ -126,8 +123,8 @@ The pipeline is designed to work in locked-down Jenkins environments where devel
 
 ### 2. Manual vs. Automated Builds
 
-- **Automated Scheduled Runs (Cron):** Jenkins runs in the background and automatically injects the concealed default passwords saved in the job configuration.
-- **Manual Runs ("Build with Parameters"):** Jenkins also automatically injects the default inputs and passwords saved in the job configuration.
+- **Automated Scheduled Runs (Cron):** Jenkins runs in the background and automatically injects the concealed default passwords saved in the job configuration, defaulting to the top choice if there are multiple (`1 week`).
+- **Manual Runs ("Build with Parameters"):** Jenkins injects saved defaults. Developers can select any scan window from the `SCAN_TIMEFRAME` dropdown before clicking **Build**.
 
 
 ---
