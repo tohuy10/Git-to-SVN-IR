@@ -39,6 +39,23 @@ pipeline {
     //         defaultValue: '',
     //         description: 'SVN Password (Masked)'
     //     )
+    //     choice(
+    //         name: 'SCAN_TIMEFRAME',
+    //         choices: [
+    //             '1 week',
+    //             '2 weeks',
+    //             '3 weeks',
+    //             '1 month',
+    //             '2 months',
+    //             '3 months',
+    //             '6 months',
+    //             '1 year',
+    //             '2 years',
+    //             'All History',
+    //             'Incremental (from latest auto-detected Excel Timestamp)'
+    //         ],
+    //         description: "Select review scan timeframe. '1 week' is the default for automated runs"
+    //     )
     // }
 
     stages {
