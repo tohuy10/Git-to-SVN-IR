@@ -36,7 +36,6 @@ An automated tool and Jenkins CI/CD pipeline that aggregates code review activit
 - **Persistent Outdated Line Citations:** Captures multi-line and single-line comment positions (e.g., `src/index.ts:L45` or `src/api.py:L10-L18`). Automatically falls back to `original_line` and `original_start_line`
 so line references survive even after code is modified or threads are resolved.
 - **HTTP Connection Pooling:** Uses a shared, pooled `requests.Session()` with HTTP Keep-Alive, significantly reducing TLS handshake overhead and network latency across hundreds of GitHub API requests.
-- **Full Historical Scan Mode:** Includes an in-code toggle (`SCAN_ALL_PRS`) to bypass watermarks and scan every historical Pull Request whenever a repository is onboarded or needs a full rebuild.
 - **GMT+7 Timezone Normalization:** All UTC timestamps from GitHub are automatically converted to GMT+7 and formatted uniformly as `DD Mon, YYYY HH:MM AM/PM` (e.g., `11 Sep, 2026 12:08 AM`).
 - **Composite Deduplication:** Prevents duplicate rows when resyncing using a composite key:  
   `Repository | Commit ID | Reviewer Name | Created At | Comment Body`.
