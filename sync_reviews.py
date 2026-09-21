@@ -37,6 +37,9 @@ def run_cmd(cmd, cwd=None):
             mask_next = True
         else:
             display_cmd.append(arg)
+    
+    print(f"[RUNNING] {' '.join(display_cmd)}", flush=True)
+    
     result = subprocess.run(cmd, cwd=cwd, text=True, capture_output=True)
     if result.returncode != 0:
         print(f"[CMD ERROR] {' '.join(display_cmd)}\nSTDERR: {result.stderr.strip()}", file=sys.stderr, flush=True)
