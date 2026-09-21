@@ -25,10 +25,21 @@ def normalize_repo_slug(raw: str) -> str:
 
 
 def run_cmd(cmd, cwd=None):
-    print(f"[RUNNING] {' '.join(cmd)}", flush=True)
+    # Mask password value in the console display
+    display_cmd = []
+    mask_next = False
+    for arg in cmd:
+        if mask_next:
+            display_cmd.append("******")
+            mask_next = False
+        elif arg == "--password":
+            display_cmd.append(arg)
+            mask_next = True
+        else:
+            display_cmd.append(arg)
     result = subprocess.run(cmd, cwd=cwd, text=True, capture_output=True)
     if result.returncode != 0:
-        print(f"[CMD ERROR] {' '.join(cmd)}\nSTDERR: {result.stderr.strip()}", file=sys.stderr, flush=True)
+        print(f"[CMD ERROR] {' '.join(display_cmd)}\nSTDERR: {result.stderr.strip()}", file=sys.stderr, flush=True)
         raise subprocess.CalledProcessError(result.returncode, cmd, result.stdout, result.stderr)
     return result.stdout.strip()
 
